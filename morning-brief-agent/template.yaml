@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Morning Brief Agent - AI-powered daily briefing assistant
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref UserProfilesTable
+        SES_SENDER_EMAIL: !Ref SesSenderEmail
+        BEDROCK_MODEL_ID: amazon.nova-lite-v1:0
+        ALLOWED_ORIGIN: !Ref FrontendUrl
+
+Parameters:
+  SesSenderEmail:
+    Type: String
+    Description: Verified SES sender email address
+    Default: briefing@yourdomain.com
+
+  FrontendUrl:
+    Type: String
+    Description: Frontend URL for CORS (Amplify URL or localhost)
+    Default: http://localhost:5173
+
+Resources:
+  # ─── DynamoDB Table ───────────────────────────────────────────────────────────
+  UserProfilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: morning-brief-users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: MorningBriefAgent
+
+  # ─── IAM Role for Lambda Functions ───────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: morning-brief-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: MorningBriefPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                Resource: !GetAtt UserProfilesTable.Arn
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.nova-lite-v1:0
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+
+  # ─── Lambda: Save Profile ─────────────────────────────────────────────────────
+  SaveProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: morning-brief-save-profile
+      CodeUri: backend/
+      Handler: save_profile.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        SaveProfile:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MorningBriefApi
+            Path: /profile
+            Method: POST
+        GetProfile:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MorningBriefApi
+            Path: /profile
+            Method: GET
+
+  # ─── Lambda: Generate Brief ───────────────────────────────────────────────────
+  GenerateBriefFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: morning-brief-generate
+      CodeUri: backend/
+      Handler: generate_brief.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Events:
+        GenerateBrief:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MorningBriefApi
+            Path: /generate
+            Method: POST
+
+  # ─── Lambda: Scheduled Daily Brief ───────────────────────────────────────────
+  ScheduledBriefFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: morning-brief-scheduled
+      CodeUri: backend/
+      Handler: generate_brief.scheduled_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      Events:
+        DailySchedule:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 0 * * ? *)  # 6:00 AM UTC daily (adjust per timezone)
+            Description: Daily Morning Brief Generation at 6 AM UTC
+
+  # ─── Lambda: Send Email ───────────────────────────────────────────────────────
+  SendEmailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: morning-brief-send-email
+      CodeUri: backend/
+      Handler: send_email.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        SendEmail:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MorningBriefApi
+            Path: /send-email
+            Method: POST
+
+  # ─── API Gateway ──────────────────────────────────────────────────────────────
+  MorningBriefApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: morning-brief-api
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: !Sub "'${FrontendUrl}'"
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${MorningBriefApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+    Export:
+      Name: MorningBriefApiEndpoint
+
+  DynamoDBTableName:
+    Description: DynamoDB table name
+    Value: !Ref UserProfilesTable
+
+  SaveProfileFunctionArn:
+    Description: Save Profile Lambda ARN
+    Value: !GetAtt SaveProfileFunction.Arn
+
+  GenerateBriefFunctionArn:
+    Description: Generate Brief Lambda ARN
+    Value: !GetAtt GenerateBriefFunction.Arn

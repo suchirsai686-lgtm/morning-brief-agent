@@ -1,0 +1,13 @@
+samconfig.toml for Morning Brief Agent
+=====================================
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "morning-brief-agent"
+s3_bucket = ""           # SAM will create this or you can specify an existing one
+s3_prefix = "morning-brief"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = "SesSenderEmail=your@email.com FrontendUrl=https://your-amplify-app.amplifyapp.com"
